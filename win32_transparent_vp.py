@@ -4,35 +4,30 @@ from ctypes import wintypes
 from dearpygui import dearpygui
 
 
-# NOTE: THESE COMMENTS ARE FOR READING!
-#
+
 # DearPyGui manages the application window (i.e. viewport) using
 # the Win32 API (on Windows only of course). This module contains
 # functions that change a particular attribute value that causes
 # a specific color (RGB) to not be painted (effectively making it 
-# "transparent"), reverse the effects of that change, and a couple
-# other convenience functions that make the process rather effortless.
-# Because, the first function in this list is not without its caveats.
-# This should work for Windows 8.1, 10, and 11.
+# "transparent"), reverse the effects of that change. There is also
+# a "convenience" function that makes this process pretty effortless.
+# It should work for Windows 8.1, 10, and 11.
 #
 # This is provided for use as-is. I've tested this pretty
 # thoroughly without issues (excluding ones mentioned above), but
 # that does not mean the issues do not exist. Consider this a disclaimer
-# for "if something goes wrong, it ain't on me." Before using any of
-# these objects, please read the docstrings as they contain some notes.
+# for "if something goes wrong, it ain't on me." Please read the callable's
+# docstrings and comments before use as they contain some useful info.
+#
+# If you aren't one for semantics and just want your transparent viewport, the
+# function you want is `toggle_dpg_viewport_transparency`. 
 #
 #   - Anthony / Atlamillias
-#
-#
-#
-# There are a total of 3 high-level functions in this module. If you
-# aren't one for semantics and just want your viewport transparent, the
-# function you want is `toggle_dpg_viewport_transparency`. 
-# 
-# The other two functions are `set_transparent_color` and
-# `unset_transparent_color`. If you plan to use these, plase make use
-# out of their docstrings as well as the docstring/comments from
-# `toggle_dpg_viewport_transparency`.
+
+
+
+
+
 
 
 __all__ = [
