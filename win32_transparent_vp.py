@@ -25,8 +25,20 @@ from dearpygui import dearpygui
 #   - Anthony / Atlamillias
 
 
-
-
+# Basic usage:
+#
+# from dearpygui import dearpygui
+# from win32_transparent_vp import toggle_dpg_viewport_transparency
+#
+# ...
+#
+# dearpygui.show_viewport()
+#
+# ...
+# 
+# toggle_dpg_viewport_transparency()
+# 
+# ...
 
 
 
