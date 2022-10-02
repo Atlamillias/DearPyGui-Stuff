@@ -1,6 +1,7 @@
 import types
 import dataclasses
-from typing import NamedTuple, Generator, Literal, Any
+from typing import NamedTuple, Generator, Any
+from typing_extensions import Self
 from dearpygui import dearpygui as dpg
 from dearpygui._dearpygui import (
     get_item_configuration,
@@ -59,56 +60,64 @@ class GridItem(NamedTuple):
     coords2: tuple[int, int] = ()
     width  : int             = 0
     height : int             = 0
+    anchor : str             = "c"
 
 
 @dataclasses.dataclass(slots=True)
 class GridSeries:
-    """Information regarding a grid's row or column.
+    """Information regarding a grid's row or column."""
+    _WEIGHT  = 1.0
+    _MINSIZE = 0
 
-    Note that if the cumulative *size* value of all series of an axis exceeds the grid
-    target item's available content region, the grid (and its items) can clip beyond it.
+    weight: float = _WEIGHT
+    size  : int   = _MINSIZE
 
-    Args:
-        * weight (float): The initial weight for the series. Affects the percentage of space
-        the series will occupy in comparison to other series' when using the "sized" policy.
-        Defaults to 1.0.
+    def configure(self, *, weight: float = None, size: int = None, **kwargs) -> None:
+        if weight is not None:
+            self.weight = max(0, weight)
+        if size is not None:
+            self.size = max(0, size)
 
-        * size (int): The minimum width/height of the column/row. Should not be less
-        than 0. Defaults to 0.
-
-        * policy (int): The resizing rule for the series. A value of 0 uses a "sized" policy
-        where the series can expand and shrink as the grid is redrawn, but will maintain its
-        minimum size. A value of 1 uses a "fixed" policy where the series will not resize with
-        the grid. Default is 0.
-    """
-    SIZED = 0
-    FIXED = 1
-
-    weight: float         = 1.0
-    size  : int           = 0
-    policy: Literal[0, 1] = SIZED
+    def configuration(self) -> dict[str, Any]:
+        return dataclasses.asdict(self)
 
 
+class GridAxis:
+    __slots__ = ("_axis",)
 
+    _WEIGHT  = GridSeries._WEIGHT
+    _MINSIZE = GridSeries._MINSIZE
 
-def _resize_axis(arr: list[GridSeries], amount: int) -> None:
-    """Args:
-        * arr (array[float]): The array containing the series' of a single axis.
+    def __init__(self, length: int):
+        self._axis: list[GridSeries] = []
+        self.resize(length)  # populate list
 
-        * amount (int): If the number is positive, a new GridSeries object is appended
-        to the array. If negative, the array will be trimmed from the end by that many
-        values.
-    """
-    current_length = len(arr)
-    if amount >= current_length:
-        arr.extend((GridSeries() for _ in range(amount)))
-    else:
-        del arr[-1: (amount-1): -1]  # trim in-place
+    def __getitem__(self, index: int) -> GridSeries:
+        return self._axis[index]
 
+    def __iter__(self) -> Generator[GridSeries, None, None]:
+        yield from self._axis
 
-def _iter_weights(arr: list[GridSeries]) -> Generator[float, None, None]:
-    for gridline in arr:
-        yield gridline.weight
+    def __len__(self) -> int:
+        return self._axis.__len__()
+
+    def resize(self, amount: int) -> None:
+        """Args:
+            * amount (int): If the number is positive, a new GridSeries object is appended
+            to the array. If negative, the array will be trimmed from the end by that many
+            values.
+        """
+        arr = self._axis
+        if amount >= len(arr):
+            arr.extend((GridSeries() for _ in range(amount)))
+        else:
+            del arr[-1: (amount-1): -1]  # trim in-place
+
+    def get_weight(self) -> float:
+        return sum(s.weight for s in self._axis if not s.size)
+
+    def get_min_size(self) -> int:
+        return sum(s.size for s in self._axis)
 
 
 class Grid:
@@ -136,8 +145,6 @@ class Grid:
         "_cols",
     )
 
-    __IndexError = IndexError("`index` outside of grid range.")
-
     def __init__(self, target: ItemId, *, cols: int = 1, rows: int = 1, spacing: Point = (0, 0), padding: Point = (0, 0)):
         """Args:
             * target (int | str): The item to scale the grid to. It must have a valid rect (i.e.
@@ -155,25 +162,20 @@ class Grid:
             * padding (Point, optional): The horizontal and vertical space between the target item's
             bounding box and an outer cell. Defaults to (0, 0).
         """
-        if rows < 1:
-            raise ValueError("Requires at least 1 row.")
-        if cols < 1:
-            raise ValueError("Requires at least 1 column.")
+        if rows < 1 or cols < 1:
+            raise ValueError("Minimum 1 column and 1 row.")
         self._target  = target
-        self._rows    = [GridSeries() for _ in range(rows)]  # y axis
-        self._cols    = [GridSeries() for _ in range(cols)]  # x axis
         self._spacing = Point(*spacing)
         self._padding = Point(*padding)
+        # These are the representation of each axis and their series/slots; accessible
+        # through their actual index.
+        self._rows = GridAxis(rows)
+        self._cols = GridAxis(cols)
 
         self._items: dict[ItemId, GridItem] = {}
         self.items = types.MappingProxyType(self._items)
 
-    def __getitem__(self, index):
-        return self.get_item(*index)
-
     def __setitem__(self, index: tuple[int, int], item: int) -> None:
-        if not isinstance(index, tuple) and len(index) != 2:
-            return NotImplemented
         self.pack(item, *index)
 
     @property
@@ -217,17 +219,6 @@ class Grid:
     def padding(self, value: tuple[int, int]) -> None:
         self.configure_grid(padding=value)
 
-    def clear(self) -> None:
-        """De-couple all items from the grid. Their current positions will be unchanged,
-        but will not be managed further."""
-        self._items.clear()
-
-    def clear_item(self, item: ItemId) -> None:
-        """De-couple an item from the grid. It's current position will be unchanged,
-        but will not be managed further.
-        """
-        self._items.pop(item, None)
-
     def configure_grid(
         self,
         *,
@@ -254,22 +245,21 @@ class Grid:
         # TODO: Get noisy when a user tries to trim the grid while items
         # occupy the space.
         if rows > 0:
-            _resize_axis(self._rows, rows - len(self._rows))
+            self._rows.resize(rows - len(self._rows))
         if cols > 0:
-            _resize_axis(self._cols, cols - len(self._cols))
+            self._cols.resize(cols - len(self._cols))
         if padding:
             self._padding = Point(*padding)
         if spacing:
             self._spacing = Point(*spacing)
-        self.redraw()
+        # self.redraw()?
 
     def configure_col(
         self,
         index: int,
         *,
-        weight: float         = None,
-        policy: Literal[0, 1] = None,
-        width : int           = None,
+        weight: float = None,
+        width : int   = None,
     ) -> None:
         """Updates the configuration of the specified column.
 
@@ -278,24 +268,22 @@ class Grid:
 
             The following are optional keyword-only arguments;
 
-            * weight (float): A weight value for the column. The floor for this value is 0.2.
+            * weight (float): The weight value for the column. Extra horizontal space in the
+            grid is distributed among columns proportional to their weight values IF the column
+            does not have a set *height*. A value less than 0 is treated as 0.
 
-            * policy (int): The resizing rule for the column. A value of 0 uses a "sized" policy
-            where the column will expand and shrink as the grid is redrawn, but will maintain
-            a minimum *width*. A value of 1 uses a "fixed" policy where the column will not
-            resize with the grid. Default is 0.
-
-            * width (int): The horizontal size of the column. Values below 0 are ignored.
+            * width (int): The width of the column. A value less than 0 is treated as
+            0.
         """
-        self._configure_series(self._rows, index, weight=weight, policy=policy, size=width)
+        self._cols[index].configure(weight=weight, size=width)
+        # self.redraw()?
 
     def configure_row(
         self,
         index: int,
         *,
-        weight: float         = None,
-        policy: Literal[0, 1] = None,
-        height: int           = None,
+        weight: float = None,
+        height: int   = None,
     ) -> None:
         """Updates the configuration of the specified row.
 
@@ -304,55 +292,31 @@ class Grid:
 
             The following are optional keyword-only arguments;
 
-            * weight (float): A weight value for the row. The floor for this value is 0.2.
+            * weight (float): The weight value for the row. Extra vertical space in the
+            grid is distributed among rows proportional to their weight values IF the row
+            does not have a set *height*. A value less than 0 is treated as 0.
 
-            * policy (int): The resizing rule for the row. A value of 0 uses a "sized" policy
-            where the row will expand and shrink as the grid is redrawn, but will maintain
-            a minimum *height*. A value of 1 uses a "fixed" policy where the row will not
-            resize with the grid. Default is 0.
-
-            * height (int): The vertical size of the row. Values below 0 are ignored.
+            * height (int): The minimum height of the row. A value less than 0 is treated
+            as 0.
         """
-        self._configure_series(self._rows, index, weight=weight, policy=policy, size=height)
+        self._rows[index].configure(weight=weight, size=height)
+        # self.redraw()?
 
-    def get_col_configuration(self, index: int) -> dict[str, Any]:
+    def get_col_configuration(self, index: int):
         """Return the configuration of a specified column.
 
         Args:
             * index (int): Target column index.
         """
-        return self._get_series_configuration(self._cols, index)
+        return self._cols[index].configuration()
 
-    def get_row_configuration(self, index: int) -> dict[str, Any]:
+    def get_row_configuration(self, index: int):
         """Return the configuration of a specified row.
 
         Args:
             * index (int): Target row index.
         """
-        return self._get_series_configuration(self._rows, index)
-
-    def get_coords(self, item: ItemId) -> tuple[tuple[int, int], tuple[int, int]]:
-        """Return the cell range coordinates of an item managed by the grid."""
-        griditem = self._items[item]
-        coords1  = griditem[1]
-        return coords1, griditem[2] or coords1
-
-    def get_item(self, row: int, col: int) -> int | str | None:
-        """Return the first item found in the grid at `(<row>, <col>)`, or None if the cell
-        is empty.
-        """
-        for item, (row1, col1), coords2, *_ in self._items.values():
-            row2, col2 = coords2 or row1, col1
-            if row1 <= row <= row2 and col1 <= col <= col2:
-                return item
-
-        # No item at index -- check if the indexes are valid.
-        try:
-            self._rows[row]
-            self._cols[col]
-        except IndexError:
-            raise IndexError("`row` or `col` outside of grid range.") from None
-        return None
+        return self._rows[index].configuration()
 
     def pack(
         self,
@@ -416,7 +380,7 @@ class Grid:
         r_count = len(rows)
         c_count = len(cols)
         r1 = r1 % r_count if r1 != -1 else r1
-        c1 = c1 % c_count if c1 != -1 else r1
+        c1 = c1 % c_count if c1 != -1 else c1
         if r2 is not None:
             r2 = r2 % r_count if r2 != -1 else r2
         else:
@@ -450,11 +414,11 @@ class Grid:
         col_cnt = len(self._cols)
         for item, (r1, c1), (r2, c2), item_width, item_height, *_ in self._items.values():
             x_pos , y_pos , width1, height1 = cells[(r1 % row_cnt, c1 % col_cnt)]  # normalizing idxs
-            x_offs, y_offs, width2, height2 = cells[(r2 % row_cnt, c2 % col_cnt)]
-            # adjust the dimensions for "merged" cells
+            x_offs, y_offs, width2, height2 = cells[(r2 % row_cnt, c2 % col_cnt)]  # normalizing idxs
+            # Adjust the dimensions for "merged" cells.
             cell_width  = x_offs + width2  - x_pos
             cell_height = y_offs + height2 - y_pos
-            # sizing item to fit the cell space
+            # Sizing item to fit the cell space.
             if not item_width or item_width > cell_width:
                 item_width = cell_width
             if not item_height or item_height > cell_height:
@@ -462,95 +426,52 @@ class Grid:
             configure_item(
                 item,
                 pos=(int(x_pos), int(y_pos)),
-                width=int(item_width),
-                height=int(item_height),
+                # Due to how DPG interprets size values, the width/height cannot be
+                # lower than 1 as it would actually make the item *larger*.
+                width=max(int(item_width), 1),
+                height=max(int(item_height), 1),
             )
 
     #### INTERNAL METHODS ####
-    def _configure_series(
-        self,
-        targets: list[GridSeries],
-        index  : int,
-        *,
-        weight : float         = None,
-        policy : Literal[0, 1] = None,
-        size   : int           = None,
-    ) -> None:
-        try:
-            tgt = targets[index]
-        except IndexError:
-            raise self.__IndexError from None
-        # The arguments are checked pretty hard because the outcome at runtime
-        # can be weird and confusing.
-        if weight is not None:
-            if not weight >= 0.2:  # prevents wonky scaling
-                raise ValueError("`weight` cannot be set below 0.2.")
-            tgt.weight = weight
-        if policy is not None:
-            # I consider this error QoL -- FIXED is the only value that's checked
-            # against; uses SIZED behavior otherwise.
-            if policy not in (GridSeries.FIXED, GridSeries.SIZED):
-                raise ValueError("`policy` should be 0 (sized) or 1 (fixed).")
-            tgt.policy = policy
-        # Don't really need to be noisy here. I'm not sure what a user
-        # would expect by passing a negative value anyway.
-        if size is not None and size >= 0:
-            tgt.size = size
-        self.redraw()
-
-    def _get_series_configuration(self, targets: list[GridSeries], index: int) -> dict[str, Any]:
-        try:
-            return dataclasses.asdict(targets[index])
-        except IndexError:
-            raise self.__IndexError from None
-
     def _get_cells(self) -> dict[Point, Rect]:
         """Return the coordinates and bounding boxes of all cells in the grid."""
         # Performance matters here -- localizing as many common vars
         # outside of loops as possible while minimizing function calls.
-        FIXED = GridSeries.FIXED
-        SIZED = GridSeries.SIZED
 
-        # grid
-        rows  = self._rows
-        cols  = [*enumerate(self._cols)]  # iterated over several times
-        cells = {}
-
-        # content region rect
+        ## content region ##
         _item_cfg = get_item_configuration(self._target)
-        cont_x_pos, cont_y_pos = self._padding   # coords are item relative, so always 0 + padding
+        cont_x_pos, cont_y_pos = self._padding   # item relative coords -- always 0 + padding
         cont_width  = (_item_cfg["width" ] - cont_x_pos - cont_x_pos)
         cont_height = (_item_cfg["height"] - cont_y_pos - cont_y_pos)
 
-        # width/height value (in pixels) of 1 weight
-        weight_wt_val = cont_width  / sum(_iter_weights(self._cols))
-        weight_ht_val = cont_height / sum(_iter_weights(rows))
+        # This will be distributed between rows/columns proportional to their
+        # individial weight values.
+        unalloc_width  = max(0, cont_width  - self._cols.get_min_size())
+        unalloc_height = max(0, cont_height - self._rows.get_min_size())
 
-        # cell rect stuff -- each cell is responsible for half of the total spacing
+        # The pixel value each "weight" is worth from the remaining space.
+        width_per_weight  = unalloc_width  / (self._cols.get_weight() or 1)  # ZeroDivisionError
+        height_per_weight = unalloc_height / (self._rows.get_weight() or 1)  # ZeroDivisionError
+
+        # cell rect stuff -- each cell is responsible for half of the spacing
         x_spacing, y_spacing = self._spacing
         cell_x_pad = x_spacing / 2
         cell_y_pad = y_spacing / 2
 
+        rows = self._rows
+        cols = [*enumerate(self._cols)]  # iterated over several times
+
+        cells = {}
         cumulative_height = 0.0
         for row, row_cfg in enumerate(rows):
-            row_min_ht = row_cfg.size
-            row_height = weight_ht_val * row_cfg.weight
-            if row_min_ht > row_height or row_cfg.policy == FIXED \
-            or cumulative_height > cont_height:
-                row_height = row_min_ht
-
+            row_height = row_cfg.size or height_per_weight * row_cfg.weight
             # cell rect (vertical)
             cell_y_pos  = cont_y_pos + cumulative_height + cell_y_pad
             cell_height = row_height - y_spacing
 
             cumulative_width = 0.0
             for col, col_cfg in cols:
-                col_min_wt = col_cfg.size
-                col_width  = weight_wt_val * col_cfg.weight
-                if col_min_wt > col_width or col_cfg.policy == FIXED \
-                or cumulative_width > cont_width:
-                    col_width = col_min_wt
-
+                col_width = col_cfg.size or width_per_weight * col_cfg.weight
                 # cell rect (horizontal)
                 cell_x_pos = cont_x_pos + cumulative_width + cell_x_pad
                 cell_width = col_width - x_spacing
@@ -570,7 +491,7 @@ class Grid:
 
 if __name__ == '__main__':
     dpg.create_context()
-    dpg.create_viewport(width=720, height=400)
+    dpg.create_viewport(width=450, height=400, min_height=10, min_width=10)
     dpg.setup_dearpygui()
     colors = [(200, 0, 0,), (0, 200, 0), (0, 0, 200), (200, 200, 0), (200, 0, 200)]
     themes = []
@@ -582,7 +503,7 @@ if __name__ == '__main__':
                 dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, [*color, 255])
         themes.append(theme)
 
-    with dpg.window(width=400, height=400, no_scrollbar=True, no_background=True) as win:
+    with dpg.window(width=450, height=400, no_scrollbar=True, no_background=True) as win:
         btn1 = dpg.add_button(label="RED")
         dpg.bind_item_theme(btn1, themes[0])
         btn2 = dpg.add_button(label="GREEN")
@@ -594,14 +515,16 @@ if __name__ == '__main__':
         btn5 = dpg.add_button(label=f"PURPLE")
         dpg.bind_item_theme(btn5, themes[4])
 
-        grid = Grid(win, cols=4, rows=4, spacing=(10, 10), padding=(10,10))
-        grid.configure_row(1, weight=0.2)
-        grid.pack(btn1,  0, 0, -1, 2)
-        grid.pack(btn2,  1, 1)
-        grid.pack(btn3,  2, 2)
-        grid.pack(btn4,  -1, 3)
-        grid.pack(btn5,  3, 1, 2, 0)
 
+        # TODO: item justification
+        grid = Grid(win, cols=3, rows=3)
+        grid.configure_col(0, weight=5.0)
+        grid.configure_col(1, width=200)
+        grid.pack(btn1, 0, 0)
+        grid.pack(btn2, 1, 0)
+        grid.pack(btn3, 2, 0)
+        grid.pack(btn4, 0, 1)
+        grid.pack(btn5, 0, -1)
 
     def resize_callback():
         grid.redraw()
@@ -609,5 +532,6 @@ if __name__ == '__main__':
     dpg.set_primary_window(win, True)
     dpg.set_viewport_resize_callback(resize_callback)
     dpg.show_viewport()
+    grid.redraw()
     while dpg.is_dearpygui_running():
         dpg.render_dearpygui_frame()
