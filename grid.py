@@ -1,7 +1,7 @@
 import types
 import dataclasses
+import enum
 from typing import NamedTuple, Generator, Any
-from typing_extensions import Self
 from dearpygui import dearpygui as dpg
 from dearpygui._dearpygui import (
     get_item_configuration,
@@ -53,14 +53,14 @@ class GridItem(NamedTuple):
         still shrink down to the row's height constraint when necessary. The default value
         of 0 means the item will always scale vertically to the size of the available content
         region. Defaults to 0.
-
     """
+
     item   : ItemId
     coords1: tuple[int, int]
-    coords2: tuple[int, int] = ()
+    coords2: tuple[int, int]
     width  : int             = 0
     height : int             = 0
-    anchor : str             = "c"
+    anchor : str             = ""
 
 
 @dataclasses.dataclass(slots=True)
@@ -104,8 +104,8 @@ class GridAxis:
     def resize(self, amount: int) -> None:
         """Args:
             * amount (int): If the number is positive, a new GridSeries object is appended
-            to the array. If negative, the array will be trimmed from the end by that many
-            values.
+            to the array based on the value. If negative, the array will be trimmed from the
+            end by that many values.
         """
         arr = self._axis
         if amount >= len(arr):
@@ -328,6 +328,7 @@ class Grid:
         *,
         max_width : int = 0,
         max_height: int = 0,
+        anchor    : str = "nw",
     ):
         """Add an item to be manged by the grid and position it in a cell. It's size will
         be adjusted to fit the cell's content region.
@@ -363,6 +364,10 @@ class Grid:
             still shrink down to the row's height constraint when necessary. A value of 0 means
             the item will always scale vertically to the size of the available content region. A
             value less than 0 is treated as 0. Defaults to 0.
+
+            * anchor (str): Affects the item's alignment and/or justification in the cell(s).
+            Accepted values are 'n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw', and 'c'. Not case-
+            sensitive. Defaults to 'nw'.
         """
         rows = self._rows
         cols = self._cols
@@ -397,7 +402,15 @@ class Grid:
 
         max_width  = 0 if max_width  < 0 else max_width
         max_height = 0 if max_height < 0 else max_height
-        self._items[item] = GridItem(item, (r1, c1), (r2, c2), max_width, max_height)
+
+        try:
+            anchor = anchor.lower() if anchor else "nw"
+        except TypeError:
+            raise TypeError(f"`anchor` should be a string (got {type(anchor)}).")
+        if anchor not in self.ANCHORS:
+            raise ValueError(f"Accepted `anchor` values; 'n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw', 'c' (got {anchor!r}).")
+
+        self._items[item] = GridItem(item, (r1, c1), (r2, c2), max_width, max_height, anchor)
         self.redraw()
 
     def redraw(self, *args, **kwargs) -> None:
@@ -407,12 +420,13 @@ class Grid:
         Ideally, this should be passed as a resize callback for the target item
         or viewport.
         """
-        # This might be a good spot to grab DearPyGui's mutex, but that's the
-        # application's responsibility and not the grid's.
+        # This would be a good spot to lock DearPyGui's mutex but that's the application's
+        # responsibility, not the grid's.
+        ANCHORS = self.ANCHORS
         cells   = self._get_cells()
         row_cnt = len(self._rows)
         col_cnt = len(self._cols)
-        for item, (r1, c1), (r2, c2), item_width, item_height, *_ in self._items.values():
+        for item, (r1, c1), (r2, c2), item_width, item_height, anchor, *_ in self._items.values():
             x_pos , y_pos , width1, height1 = cells[(r1 % row_cnt, c1 % col_cnt)]  # normalizing idxs
             x_offs, y_offs, width2, height2 = cells[(r2 % row_cnt, c2 % col_cnt)]  # normalizing idxs
             # Adjust the dimensions for "merged" cells.
@@ -425,20 +439,34 @@ class Grid:
                 item_height = cell_height
             configure_item(
                 item,
-                pos=(int(x_pos), int(y_pos)),
+                # anchor funcs don't do much unless the item is smaller than the cell
+                pos=ANCHORS[anchor](item_width, item_height, x_pos, y_pos, cell_width, cell_height),
                 # Due to how DPG interprets size values, the width/height cannot be
-                # lower than 1 as it would actually make the item *larger*.
+                # lower than 1 as it would actually make the item larger...
                 width=max(int(item_width), 1),
                 height=max(int(item_height), 1),
             )
 
-    #### INTERNAL METHODS ####
+    ANCHORS = {
+        "n" : lambda i_wt, i_ht, c_x, c_y, c_wt, c_ht: (int((c_wt - i_wt) / 2 + c_x), int(                    c_y)),  # center x
+        "ne": lambda i_wt, i_ht, c_x, c_y, c_wt, c_ht: (int((c_wt - i_wt)     + c_x), int(                    c_y)),
+        "e" : lambda i_wt, i_ht, c_x, c_y, c_wt, c_ht: (int((c_wt - i_wt)     + c_x), int((c_ht - i_ht) / 2 + c_y)),  # center y
+        "se": lambda i_wt, i_ht, c_x, c_y, c_wt, c_ht: (int((c_wt - i_wt)     + c_x), int((c_ht - i_ht)     + c_y)),
+        "s" : lambda i_wt, i_ht, c_x, c_y, c_wt, c_ht: (int((c_wt - i_wt) / 2 + c_x), int((c_ht - i_ht)     + c_y)),  # center x
+        "sw": lambda i_wt, i_ht, c_x, c_y, c_wt, c_ht: (int(                    c_x), int((c_ht - i_ht)     + c_y)),
+        "w" : lambda i_wt, i_ht, c_x, c_y, c_wt, c_ht: (int(                    c_x), int((c_ht - i_ht) / 2 + c_y)),  # center y
+        "nw": lambda i_wt, i_ht, c_x, c_y, c_wt, c_ht: (int(                    c_x), int(                    c_y)),
+        "c" : lambda i_wt, i_ht, c_x, c_y, c_wt, c_ht: (int((c_wt - i_wt) / 2 + c_x), int((c_ht - i_ht) / 2 + c_y)),  # center x & y
+    }
+
+    #### INTERNAL/PRIVATE ####
+
     def _get_cells(self) -> dict[Point, Rect]:
         """Return the coordinates and bounding boxes of all cells in the grid."""
         # Performance matters here -- localizing as many common vars
         # outside of loops as possible while minimizing function calls.
 
-        ## content region ##
+        # content region #
         _item_cfg = get_item_configuration(self._target)
         cont_x_pos, cont_y_pos = self._padding   # item relative coords -- always 0 + padding
         cont_width  = (_item_cfg["width" ] - cont_x_pos - cont_x_pos)
@@ -448,7 +476,6 @@ class Grid:
         # individial weight values.
         unalloc_width  = max(0, cont_width  - self._cols.get_min_size())
         unalloc_height = max(0, cont_height - self._rows.get_min_size())
-
         # The pixel value each "weight" is worth from the remaining space.
         width_per_weight  = unalloc_width  / (self._cols.get_weight() or 1)  # ZeroDivisionError
         height_per_weight = unalloc_height / (self._rows.get_weight() or 1)  # ZeroDivisionError
@@ -459,11 +486,12 @@ class Grid:
         cell_y_pad = y_spacing / 2
 
         rows = self._rows
-        cols = [*enumerate(self._cols)]  # iterated over several times
+        cols = [*enumerate(self._cols)]
 
         cells = {}
         cumulative_height = 0.0
         for row, row_cfg in enumerate(rows):
+            # A series with a set size value will not auto-size with the grid.
             row_height = row_cfg.size or height_per_weight * row_cfg.weight
             # cell rect (vertical)
             cell_y_pos  = cont_y_pos + cumulative_height + cell_y_pad
@@ -471,6 +499,7 @@ class Grid:
 
             cumulative_width = 0.0
             for col, col_cfg in cols:
+                # A series with a set size value will not auto-size with the grid.
                 col_width = col_cfg.size or width_per_weight * col_cfg.weight
                 # cell rect (horizontal)
                 cell_x_pos = cont_x_pos + cumulative_width + cell_x_pad
@@ -490,48 +519,75 @@ class Grid:
 
 
 if __name__ == '__main__':
+    from random import randint
+
+
+    def bind_button_theme():
+        while True:
+            item = yield
+            rgb  = randint(0, 255), randint(0, 255), randint(0, 255)
+            with dpg.theme() as theme:
+                with dpg.theme_component(0):
+                    dpg.add_theme_color(dpg.mvThemeCol_Button, [*rgb, 80])
+                    dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, [*rgb, 255])
+            dpg.bind_item_theme(item, theme)
+
+    def create_button():
+        themes = bind_button_theme().send
+        themes(None)
+        while True:
+            tag = dpg.generate_uuid()
+            item = dpg.add_button(label=tag, tag=tag)
+            themes(item)
+            yield item
+
+
+    create_button = create_button().__next__  # ye olde' button factory
+
+
     dpg.create_context()
-    dpg.create_viewport(width=450, height=400, min_height=10, min_width=10)
+    dpg.create_viewport(title="Grid Demo", width=600, height=600, min_height=10, min_width=10)
     dpg.setup_dearpygui()
-    colors = [(200, 0, 0,), (0, 200, 0), (0, 0, 200), (200, 200, 0), (200, 0, 200)]
-    themes = []
-    for i in range(5):
-        with dpg.theme() as theme:
-            with dpg.theme_component(0):
-                color = colors[i]
-                dpg.add_theme_color(dpg.mvThemeCol_Button, [*color, 50])
-                dpg.add_theme_color(dpg.mvThemeCol_ButtonHovered, [*color, 255])
-        themes.append(theme)
-
-    with dpg.window(width=450, height=400, no_scrollbar=True, no_background=True) as win:
-        btn1 = dpg.add_button(label="RED")
-        dpg.bind_item_theme(btn1, themes[0])
-        btn2 = dpg.add_button(label="GREEN")
-        dpg.bind_item_theme(btn2, themes[1])
-        btn3 = dpg.add_button(label="BLUE")
-        dpg.bind_item_theme(btn3, themes[2])
-        btn4 = dpg.add_button(label=f"YELLOW")
-        dpg.bind_item_theme(btn4, themes[3])
-        btn5 = dpg.add_button(label=f"PURPLE")
-        dpg.bind_item_theme(btn5, themes[4])
 
 
-        # TODO: item justification
-        grid = Grid(win, cols=3, rows=3)
-        grid.configure_col(0, weight=5.0)
-        grid.configure_col(1, width=200)
-        grid.pack(btn1, 0, 0)
-        grid.pack(btn2, 1, 0)
-        grid.pack(btn3, 2, 0)
-        grid.pack(btn4, 0, 1)
-        grid.pack(btn5, 0, -1)
+    with dpg.window(no_scrollbar=True, no_background=True) as win:
+        grid = Grid(win, cols=6, rows=6, padding=(5, 5), spacing=(5, 5))
 
-    def resize_callback():
-        grid.redraw()
+        # Without additional arguments, items will expand and shrink to the cell's size.
+        grid.pack(create_button(),  0,  2)  # first row
+        grid.pack(create_button(), -1,  3)  # last row
+
+        # You can clamp an item's width/height and include an alignment option. Valid
+        # options are 'n', 'ne', 'e', 'se', 's', 'sw', 'w', 'nw', and 'c'.
+        grid.pack(create_button(), 1, 1, max_height=25, anchor="w")  # west (centered)
+        grid.pack(create_button(), 1, 1, max_width=25, anchor="n")   # north (centered)
+        grid.pack(create_button(), 4, 4, max_height=25, anchor="w")
+
+        # These items will occupy a range of cells.
+        grid.pack(create_button(),  3,  1,  4,  2)
+        grid.pack(create_button(),  1,  3,  2,  4)
+        grid.pack(create_button(),  4,  0, -1,  1)
+        grid.pack(create_button(),  0,  4,  1, -1)
+
+        for anchor in grid.ANCHORS:  # '
+            kwargs = dict(max_width=50, max_height=50, anchor=anchor)
+            # pack to individual cells (cont.)
+            grid.pack(create_button(),  0,  0, **kwargs)  # first row & column
+            grid.pack(create_button(), -1, -1, **kwargs)  # last row & column
+            # pack to a "merged cell" (cont.)
+            grid.pack(create_button(),  2,  2,  3,  3, **kwargs)
+
+        # You can change the weight or set a fixed size for a row/column.
+        grid.configure_col(2, weight=0.5)  # |
+        grid.configure_col(3, weight=0.5)  # |-- These middle rows and columns will scale
+        grid.configure_row(2, weight=0.5)  # |-- to half the size of other rows/columns.
+        grid.configure_row(3, weight=0.5)  # |
 
     dpg.set_primary_window(win, True)
-    dpg.set_viewport_resize_callback(resize_callback)
     dpg.show_viewport()
-    grid.redraw()
+    # Be sure to add the grid's redraw method to a callback. Otherwise it won't resize!
+    dpg.set_viewport_resize_callback(grid.redraw)
+
+
     while dpg.is_dearpygui_running():
         dpg.render_dearpygui_frame()
